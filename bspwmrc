@@ -1,0 +1,245 @@
+#!/bin/bash
+
+pgrep -x sxhkd > /dev/null || sxhkd &
+
+$HOME/.config/polybar/config/launch.sh
+
+picom --config /home/mauro/.config/picom/picom.conf --daemon &
+
+feh --bg-fill /home/mauro/Media/Pictures/Wallpapers/ign_astronaut.png &
+/home/mauro/.screenlayout/home.sh &
+
+# Load X resources for cursor theme
+xrdb ~/.Xresources &
+
+# Set Nordzy cursor for desktop/root window
+XCURSOR_THEME=Nordzy-cursors XCURSOR_SIZE=24 xsetroot -cursor_name left_ptr &
+
+# Configure desktops per monitor - dynamic based on connected monitors
+setup_monitors() {
+    # Log function for debugging
+    log_setup() {
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - BSPWM Setup: $1" >> "$HOME/.config/bspwm/setup.log"
+    }
+
+    # Get connected monitors sorted by position for consistent ordering
+    MONITORS=($(xrandr --query | grep " connected" | awk '{print $1}' | sort))
+    NUM_MONITORS=${#MONITORS[@]}
+
+    log_setup "Detected $NUM_MONITORS monitor(s): ${MONITORS[*]}"
+
+    # Detect laptop internal display (common names: eDP-1, eDP, LVDS-1, LVDS)
+    LAPTOP_DISPLAY=$(xrandr --query | grep " connected" | grep -E "(eDP|LVDS)" | awk '{print $1}' | head -1)
+
+    # Check if laptop lid is physically closed
+    LID_STATE=$(cat /proc/acpi/button/lid/*/state 2>/dev/null | grep -o "closed" || echo "open")
+
+    if [ -n "$LAPTOP_DISPLAY" ] && [ "$LID_STATE" = "closed" ] && [ $NUM_MONITORS -ge 2 ]; then
+        # Laptop lid is physically closed and we have external monitor(s)
+        log_setup "Laptop lid closed detected - disabling laptop display and using external monitor(s)"
+
+        # Disable laptop display with xrandr to prevent mouse from moving to invisible screen
+        xrandr --output "$LAPTOP_DISPLAY" --off
+        log_setup "Disabled laptop display: $LAPTOP_DISPLAY"
+
+        # Remove laptop display from monitor array
+        EXTERNAL_MONITORS=($(printf '%s\n' "${MONITORS[@]}" | grep -v "$LAPTOP_DISPLAY"))
+
+        if [ ${#EXTERNAL_MONITORS[@]} -eq 1 ]; then
+            # Single external monitor - assign all desktops to it
+            log_setup "Single external monitor: ${EXTERNAL_MONITORS[0]} - assigning all 10 desktops"
+            # Make sure external monitor is enabled and set as primary
+            xrandr --output "${EXTERNAL_MONITORS[0]}" --auto --primary
+            MONITORS=("${EXTERNAL_MONITORS[0]}")
+            NUM_MONITORS=1
+        else
+            # Multiple external monitors - use them without laptop display
+            log_setup "Multiple external monitors detected: ${EXTERNAL_MONITORS[*]}"
+            MONITORS=("${EXTERNAL_MONITORS[@]}")
+            NUM_MONITORS=${#EXTERNAL_MONITORS[@]}
+        fi
+    elif [ -n "$LAPTOP_DISPLAY" ] && [ "$LID_STATE" = "open" ]; then
+        # Laptop lid is open - ensure laptop display is enabled
+        if ! xrandr --query | grep "$LAPTOP_DISPLAY connected" | grep -q " [0-9]"; then
+            log_setup "Laptop lid open - re-enabling laptop display: $LAPTOP_DISPLAY"
+            # Re-enable laptop display and configure multi-monitor setup
+            if [ $NUM_MONITORS -ge 2 ]; then
+                # Find external monitor
+                EXTERNAL_MONITOR=$(printf '%s\n' "${MONITORS[@]}" | grep -v "$LAPTOP_DISPLAY" | head -1)
+                if [ -n "$EXTERNAL_MONITOR" ]; then
+                    xrandr --output "$LAPTOP_DISPLAY" --auto --primary --right-of "$EXTERNAL_MONITOR"
+                    log_setup "Enabled laptop display: $LAPTOP_DISPLAY (right of $EXTERNAL_MONITOR)"
+                fi
+            else
+                xrandr --output "$LAPTOP_DISPLAY" --auto --primary
+                log_setup "Enabled laptop display: $LAPTOP_DISPLAY (single monitor mode)"
+            fi
+        fi
+    fi
+    
+    # Clear all existing desktops and monitors configuration
+    bspc wm -O ${MONITORS[0]} 2>/dev/null || true
+
+    # Remove monitors that are no longer in the active list (like laptop when lid is closed)
+    for monitor in $(bspc query -M --names 2>/dev/null); do
+        if ! printf '%s\n' "${MONITORS[@]}" | grep -q "^${monitor}$"; then
+            log_setup "Removing inactive monitor: $monitor"
+            bspc monitor $monitor -r 2>/dev/null || true
+        fi
+    done
+
+    # Total desktops to distribute
+    TOTAL_DESKTOPS=10
+    
+    case $NUM_MONITORS in
+        1)
+            # Single monitor - assign all desktops in correct order
+            log_setup "Single monitor setup: all $TOTAL_DESKTOPS desktops on ${MONITORS[0]}"
+            # Remove all existing desktops from this monitor first
+            for desktop in $(bspc query -D -m ${MONITORS[0]} --names 2>/dev/null); do
+                bspc desktop $desktop -r 2>/dev/null || true
+            done
+            # Set all desktops for single monitor in correct order
+            bspc monitor ${MONITORS[0]} -d 1 2 3 4 5 6 7 8 9 10
+            ;;
+        2)
+            # Dual monitor - split desktops (5 each)
+            log_setup "Dual monitor setup: 5 desktops per monitor"
+            # Remove existing desktops from both monitors
+            for desktop in $(bspc query -D -m ${MONITORS[0]} --names 2>/dev/null); do
+                bspc desktop $desktop -r 2>/dev/null || true
+            done
+            for desktop in $(bspc query -D -m ${MONITORS[1]} --names 2>/dev/null); do
+                bspc desktop $desktop -r 2>/dev/null || true
+            done
+            bspc monitor ${MONITORS[0]} -d 1 2 3 4 5
+            bspc monitor ${MONITORS[1]} -d 6 7 8 9 10
+            ;;
+        3)
+            # Triple monitor - distribute (4,3,3)
+            log_setup "Triple monitor setup: 4-3-3 desktop distribution"
+            for monitor in "${MONITORS[@]}"; do
+                for desktop in $(bspc query -D -m $monitor --names 2>/dev/null); do
+                    bspc desktop $desktop -r 2>/dev/null || true
+                done
+            done
+            bspc monitor ${MONITORS[0]} -d 1 2 3 4
+            bspc monitor ${MONITORS[1]} -d 5 6 7
+            bspc monitor ${MONITORS[2]} -d 8 9 10
+            ;;
+        4)
+            # Quad monitor - distribute (3,3,2,2)
+            log_setup "Quad monitor setup: 3-3-2-2 desktop distribution"
+            for monitor in "${MONITORS[@]}"; do
+                for desktop in $(bspc query -D -m $monitor --names 2>/dev/null); do
+                    bspc desktop $desktop -r 2>/dev/null || true
+                done
+            done
+            bspc monitor ${MONITORS[0]} -d 1 2 3
+            bspc monitor ${MONITORS[1]} -d 4 5 6
+            bspc monitor ${MONITORS[2]} -d 7 8
+            bspc monitor ${MONITORS[3]} -d 9 10
+            ;;
+        *)
+            # More than 4 monitors - dynamic distribution
+            log_setup "Multi-monitor setup ($NUM_MONITORS monitors): dynamic distribution"
+            # Remove all existing desktops first
+            for monitor in "${MONITORS[@]}"; do
+                for desktop in $(bspc query -D -m $monitor --names 2>/dev/null); do
+                    bspc desktop $desktop -r 2>/dev/null || true
+                done
+            done
+
+            desktops_per_monitor=$((TOTAL_DESKTOPS / NUM_MONITORS))
+            extra_desktops=$((TOTAL_DESKTOPS % NUM_MONITORS))
+            desktop_counter=1
+
+            for i in "${!MONITORS[@]}"; do
+                monitor=${MONITORS[$i]}
+                # Distribute extra desktops to first monitors
+                if [ $i -lt $extra_desktops ]; then
+                    current_desktops=$((desktops_per_monitor + 1))
+                else
+                    current_desktops=$desktops_per_monitor
+                fi
+
+                # Build desktop list for this monitor
+                desktop_list=""
+                for ((j=0; j<current_desktops; j++)); do
+                    desktop_list="$desktop_list $desktop_counter"
+                    ((desktop_counter++))
+                done
+
+                log_setup "Monitor $monitor gets desktops:$desktop_list"
+                bspc monitor $monitor -d $desktop_list
+            done
+            ;;
+    esac
+    
+    # Set primary monitor focus
+    if [ ${#MONITORS[@]} -gt 0 ]; then
+        bspc monitor ${MONITORS[0]} -f
+        log_setup "Primary monitor set to ${MONITORS[0]}"
+    fi
+    
+    log_setup "Monitor setup completed successfully"
+}
+
+setup_monitors
+
+# Force focus on desktop 1 after setup
+bspc desktop 1 -f
+
+bspc config border_width         1
+bspc config window_gap          0
+
+bspc config split_ratio          0.52
+bspc config borderless_monocle   true
+bspc config gapless_monocle      true
+
+bspc rule -a Gimp desktop='^8' state=floating follow=on
+bspc rule -a Chromium desktop='^2'
+bspc rule -a Google-chrome desktop='^2'
+bspc rule -a Postman desktop='^2'
+bspc rule -a qBittorrent desktop='^9'
+bspc rule -a Spotify desktop='^10'
+bspc rule -a mplayer2 state=floating
+bspc rule -a Kupfer.py focus=on
+bspc rule -a Screenkey manage=off
+bspc rule -a Zenity state=floating center=true
+bspc rule -a zenity state=floating center=true
+bspc rule -a "zenity":"zenity" state=floating center=true
+
+# Picture-in-Picture windows floating rules (specific window titles only)
+bspc rule -a "*":"*":"Picture-in-Picture" state=floating sticky=on
+bspc rule -a "*":"*":"Picture in picture" state=floating sticky=on
+
+# Window placement on center
+bspc config center_pseudo_tiled true
+
+# Auto focus new windows
+bspc config focus_follows_pointer false
+bspc config pointer_follows_focus false
+bspc config pointer_follows_monitor false
+
+# Application assignments (from i3 config)
+bspc rule -a Xfce4-terminal desktop='^1' follow=on
+bspc rule -a Alacritty desktop='^1' follow=on
+bspc rule -a Google-chrome follow=on
+bspc rule -a Thunar follow=on
+bspc rule -a Brave-browser follow=on
+bspc rule -a Code follow=on
+bspc rule -a vlc follow=on
+
+# Auto start applications (from i3 config)
+spotify &
+stop_all_dockers &
+
+# Start monitor hotplug system
+$HOME/.config/bspwm/start_hotplug.sh &
+
+# Power savings
+xset s 480 dpms 600 600 600 &
+
+# Audio setup (using PipeWire/wpctl instead of pacmd)
+# wpctl set-default 2 &
